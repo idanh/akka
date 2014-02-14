@@ -52,9 +52,17 @@ object SurviveNetworkInstabilityMultiJvmSpec extends MultiNodeConfig {
 
     def receive = {
       case "hello" ⇒
-        context.system.scheduler.scheduleOnce(2.seconds, self, "boom")
+        context.actorSelection("/user/bad") ! self
         sender() ! "hello"
       case "boom" ⇒ throw new SimulatedException
+    }
+  }
+
+  class BadGuy extends Actor {
+    var victims = Vector.empty[ActorRef]
+    def receive = {
+      case ref: ActorRef ⇒ victims :+= ref
+      case "boom"        ⇒ victims foreach { _ ! "boom" }
     }
   }
 
@@ -94,6 +102,7 @@ abstract class SurviveNetworkInstabilitySpec
   }
 
   system.actorOf(Props[Echo], "echo")
+  val bad = system.actorOf(Props[BadGuy], "bad")
 
   def assertCanTalk(alive: RoleName*): Unit = {
     runOn(alive: _*) {
@@ -278,12 +287,15 @@ abstract class SurviveNetworkInstabilitySpec
 
       runOn(first) {
         for (role ← others)
-          testConductor.blackhole(second, role, Direction.Send).await
+          testConductor.blackhole(role, second, Direction.Both).await
       }
       enterBarrier("blackhole-6")
 
       runOn(third) {
-        // undelivered system messages in RemoteChild on third should trigger QuarantinedEvent
+        // this will trigger Exception in RemoteChild on third, and the failures
+        // can't be reported to parent on second, resulting in too many outstanding
+        // system messages and quarantine
+        bad ! "boom"
         within(10.seconds) {
           expectMsgType[QuarantinedEvent].address should be(address(second))
         }
